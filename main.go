@@ -4,37 +4,97 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os/exec"
 	"strings"
+
+	"github.com/ziutek/glib"
+	"github.com/ziutek/gst"
 )
-
-type cmd_data struct {
-	gst_pid      string
-	stop_channel chan string
-}
-
-var running_cmds = map[string]*cmd_data{}
 
 var (
-	CAM_START = make(chan *http.Request)
-	CAM_STOP  = make(chan string)
-	FEEDBACK  = make(chan string)
+	CAM_START  = make(chan *http.Request)
+	CAM_STOP   = make(chan string)
+	CAM_STOPED = make(chan string)
+	FEEDBACK   = make(chan string)
 )
 
+var running_clients = map[string](chan string){}
+
+func create_pipeline(client string, port string) (*gst.Pipeline, error) {
+	pipeline, err := gst.ParseLaunch(
+		"videomixer name=mix background=1 " +
+			" sink_1::ypos=240 " +
+			" sink_2::ypos=480 " +
+			" sink_3::xpos=320 sink_3::ypos=480 " +
+			" sink_4::xpos=640 sink_4::ypos=480 " +
+			" sink_5::xpos=320 " +
+			"  ! omxvp8enc name=encoder control-rate=3 bitrate=400000 " +
+			"  ! rtpvp8pay " +
+			fmt.Sprintf("  ! udpsink clients=%s:%s ", client, port) +
+			"v4l2src device=\"/dev/video1\" name=pseye0 " +
+			"  ! video/x-raw,format=(string)I420,width=(int)320,height=(int)240,framerate=(fraction)60/1 " +
+			"  ! queue ! mix.sink_0 " +
+			"videotestsrc pattern=0 " +
+			"  ! video/x-raw,format=(string)I420,width=(int)320,height=(int)240,framerate=(fraction)30/1 " +
+			"  ! queue ! mix.sink_1 " +
+			"videotestsrc pattern=0 " +
+			"  ! video/x-raw,format=(string)I420,width=(int)320,height=(int)240,framerate=(fraction)30/1 " +
+			"  ! queue ! mix.sink_2 " +
+			"videotestsrc pattern=0 " +
+			"  ! video/x-raw,format=(string)I420,width=(int)320,height=(int)240,framerate=(fraction)30/1 " +
+			"  ! queue ! mix.sink_3 " +
+			"videotestsrc pattern=0 " +
+			"  ! video/x-raw,format=(string)I420,width=(int)320,height=(int)240,framerate=(fraction)30/1 " +
+			"  ! queue ! mix.sink_4 " +
+			"nvcamerasrc fpsRange=\"60.0 60.0\"" +
+			"  ! video/x-raw(memory:NVMM),format=(string)I420,width=(int)640,height=(int)480,framerate=(fraction)60/1 " +
+			"  ! nvvidconv flip-method=vertical-flip " +
+			"  ! tee name =t " +
+			"  t. ! queue ! mix.sink_5") // +
+	//"  t. ! queue ! videoconvert ! video/x-raw,format=(string)GRAY8 " +
+	//"     ! appsink sync=false name=appsink max-buffers=1 drop=true")
+
+	if err != nil {
+		return nil, err
+	}
+
+	bus := pipeline.GetBus()
+	bus.AddSignalWatch()
+	bus.Connect("message", func(bus *gst.Bus, msg *gst.Message) {
+		switch msg.GetType() {
+		case gst.MESSAGE_STREAM_STATUS:
+			fmt.Printf("Element %s is changed state.\n", msg.GetSrc().GetName())
+		case gst.MESSAGE_EOS:
+			pipeline.SetState(gst.STATE_NULL)
+		case gst.MESSAGE_ERROR:
+			pipeline.SetState(gst.STATE_NULL)
+			err, debug := msg.ParseError()
+			fmt.Printf("Error: %s (debug: %s)\n", err, debug)
+		}
+
+	}, nil)
+
+	//appsink := (*AppSink)(pipeline.GetByName("appsink"))
+	//go app_sink_routine(appsink)
+
+	return pipeline, nil
+}
+
 func stop_cam(client string) {
-	if running_cmds[client] != nil {
-		log.Printf("Killing process [pid=%s]\n", running_cmds[client].gst_pid)
-		running_cmds[client].stop_channel <- client
-		running_cmds[client] = nil
+	log.Printf("Request killing process [client=%s]\n", client)
+	if running_clients[client] != nil {
+		log.Printf("Killing process [client=%s]\n", client)
+		running_clients[client] <- client
+		running_clients[client] = nil
+	} else {
+		CAM_STOPED <- client
 	}
 }
 
-func start_cam(client string, port string) {
-	cmd := exec.Command("sh", "/home/ubuntu/cam-test.sh", client, port)
-	out, err := cmd.CombinedOutput()
-
+func camera_routine(client, port string, loopchan chan *glib.MainLoop) {
+	pipeline, err := create_pipeline(client, port)
 	if err != nil {
 		FEEDBACK <- err.Error()
+		loopchan <- nil
 	} else {
 		html := `<!doctype html>
 	<html>
@@ -43,38 +103,64 @@ func start_cam(client string, port string) {
 			<title>Jetson Camera Status</title>
 		</head>
 		<body>
-			<p>Camera Initialized [pid=%s]!</p>
 			<p>Use:</p>
 			<textarea>gst-launch-1.0 udpsrc port=%s caps="application/x-rtp,media=(string)video,clock-rate=(int)90000, encoding-name=(string)VP8-DRAFT-IETF-01,payload=(int)96" ! rtpvp8depay ! vp8dec ! d3dvideosink </textarea>
 		</body>
 	</html>`
 
-		pid := string(out[:len(out)-1])
-		log.Printf("Running at [pid=%s]\n", pid)
-		data := cmd_data{pid, make(chan string)}
-		running_cmds[client] = &data
-		FEEDBACK <- fmt.Sprintf(html, pid, port)
-		<-data.stop_channel
-		killcmd := exec.Command("kill", pid)
-		killcmd.Start()
-		killcmd.Wait()
-		log.Printf("[pid=%s] finished!\n", pid)
+		FEEDBACK <- fmt.Sprintf(html, port)
+
+		pipeline.SetState(gst.STATE_PLAYING)
+		mainloop := glib.NewMainLoop(nil)
+
+		log.Println("Main loop Sending")
+		loopchan <- mainloop
+		mainloop.Run()
+
+		pipeline.SetState(gst.STATE_NULL)
+		pipeline.Unref()
+		CAM_STOPED <- client
+		log.Println("Main loop Ended")
 	}
+}
+
+func start_cam(client, port string) {
+	log.Println("Start Cam")
+	loopchan := make(chan *glib.MainLoop)
+
+	go camera_routine(client, port, loopchan)
+
+	mainloop := <-loopchan
+	if loopchan == nil {
+		return
+	}
+	stop_channel := make(chan string)
+	running_clients[client] = stop_channel
+	<-stop_channel
+	fmt.Println("Quiting mainloop.")
+	mainloop.Quit()
 }
 
 func cam_loop() {
 	for {
 		select {
 		case r := <-CAM_START:
-			client := strings.Split(r.RemoteAddr, ":")[0]
+			client := r.URL.Query().Get("client")
+			if client == "" {
+				client = strings.Split(r.RemoteAddr, ":")[0]
+			}
+
 			port := r.URL.Query().Get("port")
 			if port == "" {
 				port = "554"
 			}
-			stop_cam(client)
+
+			go stop_cam(client)
+			<-CAM_STOPED
 			go start_cam(client, port)
 		case c := <-CAM_STOP:
-			stop_cam(c)
+			go stop_cam(c)
+			<-CAM_STOPED
 		}
 	}
 }
@@ -105,8 +191,8 @@ func handler_help(w http.ResponseWriter, r *http.Request) {
 		</body>
 	</html>`
 	client_list := ""
-	for k, v := range running_cmds {
-		line := fmt.Sprintf("<p>client='%s' pid=%d</p><br>", k, v.gst_pid)
+	for k, _ := range running_clients {
+		line := fmt.Sprintf("<p>client='%s'</p><br>", k)
 		client_list = fmt.Sprintf("%s%s", client_list, line)
 	}
 	fmt.Fprintf(w, html, client, client_list)
