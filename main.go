@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 
+	"os"
+
 	"github.com/ziutek/glib"
 	"github.com/ziutek/gst"
 )
@@ -19,37 +21,48 @@ var (
 
 var running_clients = map[string](chan string){}
 
-func create_pipeline(client string, port string) (*gst.Pipeline, error) {
+func nvpads(w, h, fps int) string { return fmt.Sprintf(" ! video/x-raw(memory:NVMM),format=(string)I420,width=(int)%d,height=(int)%d,framerate=(fraction)%d/1 ",w,h,fps) }
+func pads(w, h, fps int) string { return fmt.Sprintf("  ! video/x-raw,format=(string)I420,width=(int)%d,height=(int)%d,framerate=(fraction)%d/1 ",w,h,fps) }
+func nvcamera() string { return " nvcamerasrc fpsRange=\"60.0 60.0\"" }
+func camera(cameraid int, name string ) string {
+	path := fmt.Sprintf("/dev/video%d", cameraid)
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Sprintf(" videotestsrc pattern=0 ")
+	} else {
+		return fmt.Sprintf(" v4l2src device=\"%s\" name=%s ", path, name)
+	}
+}
+func to_mix_sink(mix string, sink int) string { return fmt.Sprintf(" ! queue ! %s.sink_%d", mix, sink) }
+func udp_sink(client, port string) string { return fmt.Sprintf(" ! udpsink clients=%s:%s ", client, port) }
+func rotate(method int) string { return fmt.Sprintf(" ! videoflip method=%d ", method) }
+func nvflip() string { return " ! nvvidconv flip-method=vertical-flip " }
+func vp8_rtp_pack() string { return "  ! omxvp8enc name=encoder control-rate=3 bitrate=400000 ! rtpvp8pay " }
+func h265_rtp_pack() string { return "  ! omxh265enc name=encoder control-rate=3 bitrate=400000 ! rtph265pay " }
+func video_mixer(name string) string { return fmt.Sprintf("videomixer name=%s background=1 ", name) }
+func mixer_sink(id, x, y int) string { return fmt.Sprintf(" sink_%d::xpos=%d sink_%d::ypos=%d ", id, x, id, y) }
+
+func create_pipeline(client, port string) (*gst.Pipeline, error) {
 	pipeline, err := gst.ParseLaunch(
-		"videomixer name=mix background=1 " +
-			" sink_1::ypos=240 " +
-			" sink_2::ypos=480 " +
-			" sink_3::xpos=320 sink_3::ypos=480 " +
-			" sink_4::xpos=640 sink_4::ypos=480 " +
-			" sink_5::xpos=320 " +
-			"  ! omxvp8enc name=encoder control-rate=3 bitrate=400000 " +
-			"  ! rtpvp8pay " +
-			fmt.Sprintf("  ! udpsink clients=%s:%s ", client, port) +
-			"v4l2src device=\"/dev/video1\" name=pseye0 " +
-			"  ! video/x-raw,format=(string)I420,width=(int)320,height=(int)240,framerate=(fraction)60/1 " +
-			"  ! queue ! mix.sink_0 " +
-			"videotestsrc pattern=0 " +
-			"  ! video/x-raw,format=(string)I420,width=(int)320,height=(int)240,framerate=(fraction)30/1 " +
-			"  ! queue ! mix.sink_1 " +
-			"videotestsrc pattern=0 " +
-			"  ! video/x-raw,format=(string)I420,width=(int)320,height=(int)240,framerate=(fraction)30/1 " +
-			"  ! queue ! mix.sink_2 " +
-			"videotestsrc pattern=0 " +
-			"  ! video/x-raw,format=(string)I420,width=(int)320,height=(int)240,framerate=(fraction)30/1 " +
-			"  ! queue ! mix.sink_3 " +
-			"videotestsrc pattern=0 " +
-			"  ! video/x-raw,format=(string)I420,width=(int)320,height=(int)240,framerate=(fraction)30/1 " +
-			"  ! queue ! mix.sink_4 " +
-			"nvcamerasrc fpsRange=\"60.0 60.0\"" +
-			"  ! video/x-raw(memory:NVMM),format=(string)I420,width=(int)640,height=(int)480,framerate=(fraction)60/1 " +
-			"  ! nvvidconv flip-method=vertical-flip " +
+		video_mixer("mix") +
+			mixer_sink(0, 0, 0) +
+			mixer_sink(1, 320, 0) +
+			mixer_sink(2, 0, 244) +
+			mixer_sink(3, 400, 244) +
+			mixer_sink(4, 644, 0) +
+
+			vp8_rtp_pack() +
+			udp_sink(client, port) + 
+
+			camera(1,"pseye0") + pads(320, 240, 30) + to_mix_sink("mix", 0) +
+			camera(2,"pseye1") + pads(320, 240, 30) + to_mix_sink("mix", 1) +
+			camera(3,"pseye2") + pads(320, 240, 30) + rotate(3) + to_mix_sink("mix", 2) +
+			camera(4,"pseye3") + pads(320, 240, 30) + rotate(1) + to_mix_sink("mix", 3) +
+
+			nvcamera() + nvpads(640, 480, 30) +
+			nvflip() +
 			"  ! tee name =t " +
-			"  t. ! queue ! mix.sink_5") // +
+			"  t. " + to_mix_sink("mix", 4))
+	// +
 	//"  t. ! queue ! videoconvert ! video/x-raw,format=(string)GRAY8 " +
 	//"     ! appsink sync=false name=appsink max-buffers=1 drop=true")
 
@@ -104,7 +117,7 @@ func camera_routine(client, port string, loopchan chan *glib.MainLoop) {
 		</head>
 		<body>
 			<p>Use:</p>
-			<textarea>gst-launch-1.0 udpsrc port=%s caps="application/x-rtp,media=(string)video,clock-rate=(int)90000, encoding-name=(string)VP8-DRAFT-IETF-01,payload=(int)96" ! rtpvp8depay ! vp8dec ! d3dvideosink </textarea>
+			<textarea>gst-launch-1.0 udpsrc port=%s caps="application/x-rtp,media=(string)video,clock-rate=(int)90000, encoding-name=(string)VP8,payload=(int)96" ! rtpvp8depay ! vp8dec ! d3dvideosink </textarea>
 		</body>
 	</html>`
 
