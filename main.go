@@ -109,17 +109,7 @@ func camera_routine(client, port string, loopchan chan *glib.MainLoop) {
 		FEEDBACK <- err.Error()
 		loopchan <- nil
 	} else {
-		html := `<!doctype html>
-	<html>
-		<head>
-			<meta charset='utf-8'>
-			<title>Jetson Camera Status</title>
-		</head>
-		<body>
-			<p>Use:</p>
-			<textarea>gst-launch-1.0 udpsrc port=%s caps="application/x-rtp,media=(string)video,clock-rate=(int)90000, encoding-name=(string)VP8,payload=(int)96" ! rtpvp8depay ! vp8dec ! d3dvideosink </textarea>
-		</body>
-	</html>`
+		html := `udpsrc port=%s caps="application/x-rtp,media=(string)video,clock-rate=(int)90000,encoding-name=(string)VP8,payload=(int)96" ! rtpvp8depay ! vp8dec ! autovideosink`
 
 		FEEDBACK <- fmt.Sprintf(html, port)
 
@@ -189,6 +179,10 @@ func handler_camera(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, result)
 }
 
+func handler_ping(w http.ResponseWriter, r *http.Request) {
+     fmt.Fprintf(w, "pong")
+}
+
 func handler_help(w http.ResponseWriter, r *http.Request) {
 	client := strings.Split(r.RemoteAddr, ":")[0]
 	html := `<!doctype html>
@@ -217,6 +211,7 @@ func main() {
 	http.HandleFunc("/", handler_help)
 	http.HandleFunc("/camera", handler_camera)
 	http.HandleFunc("/params", handler_params)
+	http.HandleFunc("/ping", handler_ping)
 	http.ListenAndServe(":5800", nil)
 	log.Println("Server Shutdown")
 }
