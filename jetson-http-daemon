@@ -1,0 +1,106 @@
+#!/bin/bash
+
+### BEGIN INIT INFO
+# Provides:                 jetson-http-server
+# Short-Description:        Start and stop JETSON_HTTP_SERVER service.
+# Description:              -
+# Required-Start:           
+# Required-Stop:            
+# Default-Start:            2 3 4 5
+# Default-Stop:             
+# Date-Creation:            -
+# Date-Last-Modification:   -
+# Author:                   -
+### END INIT INFO
+
+# Variables
+PGREP=/usr/bin/pgrep
+ZERO=0
+
+# Start the jetson-http-server
+start() {
+    echo "Starting jetson-http-server..."
+    #Verify if the service is running
+    $PGREP -f jetson-http-server > /dev/null
+    VERIFIER=$?
+    if [ $ZERO = $VERIFIER ]
+    then
+        echo "The service is already running"
+    else
+	(exec /home/ubuntu/go/bin/jetson-http-server)&
+        #sleep time before the service verification
+        sleep 10
+        #Verify if the service is running
+        $PGREP -f jetson-http-server  > /dev/null
+        VERIFIER=$?
+        if [ $ZERO = $VERIFIER ]
+        then
+            echo "Service was successfully started"
+        else
+            echo "Failed to start service"
+        fi
+    fi
+    echo
+}
+
+stop() {
+    echo "Stopping jetson-http-server..."
+    #Verify if the service is running
+    $PGREP -f jetson-http-server > /dev/null
+    VERIFIER=$?
+    if [ $ZERO = $VERIFIER ]
+    then
+        #Kill the pid of java with the service name
+        kill -9 $($PGREP -f jetson-http-server)
+        #Sleep time before the service verification
+        sleep 10
+        #Verify if the service is running
+        $PGREP -f jetson-http-server  > /dev/null
+        VERIFIER=$?
+        if [ $ZERO = $VERIFIER ]
+        then
+            echo "Failed to stop service"
+        else
+            echo "Service was successfully stopped"
+        fi
+    else
+        echo "The service is already stopped"
+    fi
+    echo
+}
+
+# Verify the status of MATH
+status() {
+    echo "Checking status of jetson-http-server..."
+    #Verify if the service is running
+    $PGREP -f jetson-http-server > /dev/null
+    VERIFIER=$?
+    if [ $ZERO = $VERIFIER ]
+    then
+        echo "Service is running"
+    else
+        echo "Service is stopped"
+    fi
+    echo
+}
+
+# Main logic
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    status)
+        status
+        ;;
+    restart|reload)
+        stop
+        start
+        ;;
+  *)
+    echo $"Usage: $0 {start|stop|status|restart|reload}"
+    exit 1
+esac
+exit 0
