@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"strconv"
 
 	"os"
 
@@ -37,34 +38,20 @@ func udp_sink(client, port string) string { return fmt.Sprintf(" ! udpsink clien
 func rotate(method int) string { return fmt.Sprintf(" ! videoflip method=%d ", method) }
 func nvflip() string { return " ! nvvidconv flip-method=vertical-flip " }
 func vp8_rtp_pack() string { return "  ! omxvp8enc name=encoder control-rate=3 bitrate=400000 ! rtpvp8pay " }
+func vp9_rtp_pack() string { return "  ! omxvp9enc name=encoder control-rate=3 bitrate=400000 ! rtpvp9pay " }
 func h265_rtp_pack() string { return "  ! omxh265enc name=encoder control-rate=3 bitrate=400000 ! rtph265pay " }
 func video_mixer(name string) string { return fmt.Sprintf("videomixer name=%s background=1 ", name) }
 func mixer_sink(id, x, y int) string { return fmt.Sprintf(" sink_%d::xpos=%d sink_%d::ypos=%d ", id, x, id, y) }
 
-func create_pipeline(client, port string) (*gst.Pipeline, error) {
-	pipeline, err := gst.ParseLaunch(
-		video_mixer("mix") +
-			mixer_sink(0, 0, 0) +
-			mixer_sink(1, 320, 0) +
-			mixer_sink(2, 0, 244) +
-			mixer_sink(3, 400, 244) +
-			mixer_sink(4, 644, 0) +
+func create_pipeline(client, port, layout string) (*gst.Pipeline, error) {
+     var err error
+     var pipeline *gst.Pipeline
+     
+     switch {
+     case strings.HasPrefix(layout, "only"): pipeline, err = create_pipeline_single(client, port, layout)
 
-			vp8_rtp_pack() +
-			udp_sink(client, port) + 
-
-			camera(1,"pseye0") + pads(320, 240, 30) + to_mix_sink("mix", 0) +
-			camera(2,"pseye1") + pads(320, 240, 30) + to_mix_sink("mix", 1) +
-			camera(3,"pseye2") + pads(320, 240, 30) + rotate(3) + to_mix_sink("mix", 2) +
-			camera(4,"pseye3") + pads(320, 240, 30) + rotate(1) + to_mix_sink("mix", 3) +
-
-			nvcamera() + nvpads(640, 480, 30) +
-			nvflip() +
-			"  ! tee name =t " +
-			"  t. " + to_mix_sink("mix", 4))
-	// +
-	//"  t. ! queue ! videoconvert ! video/x-raw,format=(string)GRAY8 " +
-	//"     ! appsink sync=false name=appsink max-buffers=1 drop=true")
+     default:  pipeline, err = create_pipeline_default(client, port)
+     }
 
 	if err != nil {
 		return nil, err
@@ -86,10 +73,40 @@ func create_pipeline(client, port string) (*gst.Pipeline, error) {
 
 	}, nil)
 
-	//appsink := (*AppSink)(pipeline.GetByName("appsink"))
-	//go app_sink_routine(appsink)
-
 	return pipeline, nil
+
+}
+
+func create_pipeline_default(client, port string) (*gst.Pipeline, error) {
+	return gst.ParseLaunch(
+		video_mixer("mix") +
+			mixer_sink(0, 0, 0) +
+			mixer_sink(1, 640, 0) +
+			mixer_sink(2, 640, 240) +
+			mixer_sink(3, 450, 330) +
+
+			vp9_rtp_pack() +
+			udp_sink(client, port) + 
+
+			camera(1,"pseye0") + pads(640, 480, 15) + to_mix_sink("mix", 0) +
+			camera(2,"pseye1") + pads(320, 240, 15) + to_mix_sink("mix", 1) +
+			camera(3,"pseye2") + pads(320, 240, 15) + to_mix_sink("mix", 2) +
+			camera(4,"pseye3") + pads(160, 120, 15) + to_mix_sink("mix", 3))
+}
+
+func create_pipeline_single(client, port, layout string) (*gst.Pipeline, error) {
+     cameraIndex, err:= strconv.ParseInt(layout[len(layout)-1:], 10, 64)
+     if err != nil {
+     	return nil, err
+     }
+     return gst.ParseLaunch(
+		video_mixer("mix") +
+			mixer_sink(0, 0, 0) +
+
+			vp9_rtp_pack() +
+			udp_sink(client, port) + 
+
+			camera(int(cameraIndex),"pseye0") + pads(640, 480, 15) + to_mix_sink("mix", 0))
 }
 
 func stop_cam(client string) {
@@ -103,13 +120,13 @@ func stop_cam(client string) {
 	}
 }
 
-func camera_routine(client, port string, loopchan chan *glib.MainLoop) {
-	pipeline, err := create_pipeline(client, port)
+func camera_routine(client, port, layout string, loopchan chan *glib.MainLoop) {
+	pipeline, err := create_pipeline(client, port, layout)
 	if err != nil {
 		FEEDBACK <- err.Error()
 		loopchan <- nil
 	} else {
-		html := `udpsrc port=%s caps="application/x-rtp,media=(string)video,clock-rate=(int)90000,encoding-name=(string)VP8,payload=(int)96" ! rtpvp8depay ! vp8dec ! autovideosink`
+		html := `udpsrc port=%s caps="application/x-rtp,media=(string)video,clock-rate=(int)90000,encoding-name=(string)VP9,payload=(int)96" ! rtpvp9depay ! vp9dec ! autovideosink`
 
 		FEEDBACK <- fmt.Sprintf(html, port)
 
@@ -127,16 +144,17 @@ func camera_routine(client, port string, loopchan chan *glib.MainLoop) {
 	}
 }
 
-func start_cam(client, port string) {
-	log.Println("Start Cam")
+func start_cam(client, port, layout string) {
+	log.Printf("Start Cam to=%s:%s layout=%s", client, port, layout)
 	loopchan := make(chan *glib.MainLoop)
 
-	go camera_routine(client, port, loopchan)
+	go camera_routine(client, port, layout, loopchan)
 
 	mainloop := <-loopchan
 	if loopchan == nil {
 		return
 	}
+	
 	stop_channel := make(chan string)
 	running_clients[client] = stop_channel
 	<-stop_channel
@@ -158,9 +176,11 @@ func cam_loop() {
 				port = "554"
 			}
 
+			layout := r.URL.Query().Get("layout")
+
 			go stop_cam(client)
 			<-CAM_STOPED
-			go start_cam(client, port)
+			go start_cam(client, port, layout)
 		case c := <-CAM_STOP:
 			go stop_cam(c)
 			<-CAM_STOPED
