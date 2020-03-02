@@ -41,13 +41,14 @@ func to_mix_sink(mix string, sink int) string { return fmt.Sprintf(" ! queue ! %
 func udp_sink(client, port string) string {
 	return fmt.Sprintf(" ! udpsink clients=%s:%s ", client, port)
 }
+func videoscaler(width int, height int) string { return fmt.Sprintf(" ! videoscale ! video/x-raw,width=(int)%d,height=(int)%d ", width, height) }
 func rotate(method int) string { return fmt.Sprintf(" ! videoflip method=%d ", method) }
 func nvflip() string           { return " ! nvvidconv flip-method=vertical-flip " }
 func vp8_rtp_pack() string {
 	return "  ! omxvp8enc name=encoder control-rate=3 bitrate=400000 ! rtpvp8pay "
 }
 func vp9_rtp_pack() string {
-	return "  ! omxvp9enc name=encoder control-rate=3 bitrate=400000 ! rtpvp9pay "
+	return "  ! vp9enc name=encoder control-rate=3 bitrate=400000 ! rtpvp9pay "
 }
 func h265_rtp_pack() string {
 	return "  ! omxh265enc name=encoder control-rate=3 bitrate=400000 ! rtph265pay "
@@ -99,20 +100,24 @@ func create_pipeline(client, port, layout, hertz string) (*gst.Pipeline, error) 
 
 func create_pipeline_default(client, port string, hertz int) (*gst.Pipeline, error) {
 
-	return gst.ParseLaunch(
-		video_mixer("mix") +
+
+	config:=video_mixer("mix") +
 			mixer_sink(0, 0, 0) +
-			mixer_sink(1, 640, 0) +
+			mixer_sink(1, 240, 0) +
 			mixer_sink(2, 640, 240) +
 			mixer_sink(3, 450, 330) +
 
-			vp9_rtp_pack() +
+			vp8_rtp_pack() +
 			udp_sink(client, port) +
 
 			camera(1, "pseye0") + pads(640, 480, hertz) + to_mix_sink("mix", 0) +
-			camera(2, "pseye1") + pads(320, 240, hertz) + to_mix_sink("mix", 1) +
-			camera(3, "pseye2") + pads(320, 240, hertz) + to_mix_sink("mix", 2) +
-			camera(4, "pseye3") + pads(160, 120, hertz) + to_mix_sink("mix", 3))
+			camera(0, "pseye1") + pads(640, 480, hertz) + videoscaler(160,120) + to_mix_sink("mix", 1) 
+			//camera(2, "pseye2") + pads(640, 480, hertz) + videoscaler(320, 240) + to_mix_sink("mix", 2) +
+			//camera(3, "pseye3") + pads(640, 480, hertz) + videoscaler(160, 120) + to_mix_sink("mix", 3)
+
+	log.Println(config)
+
+	return gst.ParseLaunch(config)
 }
 
 func create_pipeline_single(client, port, layout string, hertz int) (*gst.Pipeline, error) {
@@ -120,14 +125,18 @@ func create_pipeline_single(client, port, layout string, hertz int) (*gst.Pipeli
 	if err != nil {
 		return nil, err
 	}
-	return gst.ParseLaunch(
-		video_mixer("mix") +
+
+	config :=	video_mixer("mix") +
 			mixer_sink(0, 0, 0) +
 
-			vp9_rtp_pack() +
+			vp8_rtp_pack() +
 			udp_sink(client, port) +
 
-			camera(int(cameraIndex), "pseye0") + pads(640, 480, hertz) + to_mix_sink("mix", 0))
+			camera(int(cameraIndex), "pseye0") + pads(640,480, hertz) + to_mix_sink("mix", 0)
+
+	log.Println(config)
+
+	return gst.ParseLaunch(config)
 }
 
 func stop_cam(client string) {
@@ -199,7 +208,7 @@ func cam_loop() {
 
 			hertz := r.URL.Query().Get("hertz")
 			if hertz == "" {
-				hertz = "15"
+				hertz = "30"
 			}
 
 			layout := r.URL.Query().Get("layout")
@@ -258,6 +267,6 @@ func main() {
 	http.HandleFunc("/camera", handler_camera)
 	http.HandleFunc("/params", handler_params)
 	http.HandleFunc("/ping", handler_ping)
-	http.ListenAndServe(":5800", nil)
+	http.ListenAndServe(":5800" , nil)
 	log.Println("Server Shutdown")
 }
